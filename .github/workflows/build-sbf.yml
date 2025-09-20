@@ -18,8 +18,7 @@ name: build-sbf
 
         - name: Install Agave CLI v2.3.9
           run: |
-            curl -sSfL https://github.com/anza-xyz/agave/releases/download/v2.3.9/agave-install-init-x86_64-unknown-linux-gnu -o agave-install-
-  init
+            curl -sSfL https://github.com/anza-xyz/agave/releases/download/v2.3.9/agave-install-init-x86_64-unknown-linux-gnu -o agave-install-init
             chmod +x agave-install-init
             ./agave-install-init v2.3.9
             echo "$HOME/.local/share/agave/install/active_release/bin" >> $GITHUB_PATH
