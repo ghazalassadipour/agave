@@ -7,24 +7,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Install Agave CLI v2.3.9
+      - name: Install Agave CLI v2.4.10
         run: |
           set -eux
-          curl -sSfL https://github.com/anza-xyz/agave/releases/download/v2.3.9/agave-install-init-x86_64-unknown-linux-gnu -o agave-install-init
+          curl -sSfL https://github.com/anza-xyz/agave/releases/download/v2.4.10/agave-install-init-x86_64-unknown-linux-gnu -o agave-install-init
           chmod +x agave-install-init
-          ./agave-install-init v2.3.9
+          ./agave-install-init v2.4.10
           echo "$HOME/.local/share/agave/install/active_release/bin" >> "$GITHUB_PATH"
-      
-      - name: Install Solana Tools for cargo-build-sbf
-        run: |
-          set -eux
-          sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       
       - name: Show tool versions
         run: |
           set -eux
-          which cargo-build-sbf || true
+          which cargo-build-sbf
           cargo-build-sbf --version
       
       - name: Build stake (SBF)
