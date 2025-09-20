@@ -9,16 +9,33 @@ jobs:
       
       - name: Install Agave CLI v2.3.9
         run: |
+          set -eux
           curl -sSfL https://github.com/anza-xyz/agave/releases/download/v2.3.9/agave-install-init-x86_64-unknown-linux-gnu -o agave-install-init
           chmod +x agave-install-init
           ./agave-install-init v2.3.9
-          echo "$HOME/.local/share/agave/install/active_release/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/share/agave/install/active_release/bin" >> "$GITHUB_PATH"
+      
+      - name: Install Solana Tools for cargo-build-sbf
+        run: |
+          set -eux
+          sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      
+      - name: Show tool versions
+        run: |
+          set -eux
+          which cargo-build-sbf || true
+          cargo-build-sbf --version
       
       - name: Build stake (SBF)
-        run: cargo-build-sbf --manifest-path programs/stake/Cargo.toml
+        run: |
+          set -eux
+          cargo-build-sbf --manifest-path programs/stake/Cargo.toml
       
       - name: Build vote (SBF)
-        run: cargo-build-sbf --manifest-path programs/vote/Cargo.toml
+        run: |
+          set -eux
+          cargo-build-sbf --manifest-path programs/vote/Cargo.toml
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
