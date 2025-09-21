@@ -1,47 +1,59 @@
 name: build-sbf
-on:
+  on:
   workflow_dispatch:
-jobs:
+  jobs:
   build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout upstream Agave v2.3.9
-        uses: actions/checkout@v4
-        with:
-          repository: anza-xyz/agave
-          ref: v2.3.9
-          fetch-depth: 0
-      
-      - name: Build stake+vote in clean amd64 Ubuntu container
-        run: |
-          set -eux
-          docker run --rm -v "$PWD:/work" -w /work --platform=linux/amd64 ubuntu:22.04 bash -lc '
+  runs-on: ubuntu-latest
+  steps:
+  - name: Checkout upstream Agave v2.3.9
+  uses: actions/checkout@v4
+  with:
+  repository: anza-xyz/agave
+  ref: v2.3.9
+  fetch-depth: 0
+
+        - name: Install system deps
+          run: |
             set -eux
-            # System deps
-            apt-get update &&
-            apt-get install -y curl ca-certificates git pkg-config libssl-dev build-essential
-            # Rust (cargo) for this shell
-            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            export PATH="$HOME/.cargo/bin:$PATH"
-            # Install Agave CLI (provides cargo-build-sbf)
-            curl -sSfL https://github.com/anza-xyz/agave/releases/download/v2.3.9/agave-install-init-x86_64-unknown-linux-gnu -o /usr/local/bin/agave-install-init
-            chmod +x /usr/local/bin/agave-install-init
-            /usr/local/bin/agave-install-init v2.3.9
-            # Ensure both possible install locations are on PATH
-            export PATH="$HOME/.local/share/solana/install/active_release/bin:$HOME/.local/share/agave/install/active_release/bin:$PATH"
-            # Sanity check tools
-            which cargo
-            which cargo-build-sbf
+            sudo apt-get update
+            sudo apt-get install -y curl ca-certificates git pkg-config libssl-dev build-essential
+
+        - name: Install Rust (stable)
+          run: |
+            set -eux
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+        - name: Install Agave CLI v2.3.9
+          run: |
+            set -eux
+            curl -sSfL https://github.com/anza-xyz/agave/releases/download/v2.3.9/agave-install-init-x86_64-unknown-linux-gnu -o agave-install-
+  init
+            chmod +x agave-install-init
+            ./agave-install-init v2.3.9
+            echo "$HOME/.local/share/agave/install/active_release/bin" >> "$GITHUB_PATH"
+            echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+        - name: Show tools
+          run: |
+            set -eux
+            rustc --version
             cargo --version
+            which cargo-build-sbf
             cargo-build-sbf --version
-            # Build using repo'"'"'s lockfiles to avoid edition-2024 pulls
+
+        - name: Build stake (locked)
+          run: |
+            set -eux
             cargo-build-sbf --manifest-path programs/stake/Cargo.toml -- --locked
+
+        - name: Build vote (locked)
+          run: |
+            set -eux
             cargo-build-sbf --manifest-path programs/vote/Cargo.toml -- --locked
-            ls -l target/deploy/*.so
-          '
-      
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbf-artifacts
-          path: target/deploy/*.so
+
+        - name: Upload artifacts
+          uses: actions/upload-artifact@v4
+          with:
+            name: sbf-artifacts
+            path: target/deploy/*.so
