@@ -12,26 +12,43 @@ jobs:
           ref: v2.3.9
           fetch-depth: 0
       
-      - name: Install system deps + Rust + Agave CLI (same shell)
+      - name: Install system deps
         run: |
           set -eux
           sudo apt-get update
           sudo apt-get install -y curl ca-certificates git pkg-config libssl-dev build-essential
-          # Rust (cargo) so cargo-build-sbf can run cargo metadata
+      
+      - name: Install Rust (stable)
+        run: |
+          set -eux
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          export PATH="$HOME/.cargo/bin:$PATH"
-          # Agave CLI (cargo-build-sbf) v2.3.9
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      
+      - name: Install Agave CLI v2.3.9
+        run: |
+          set -eux
           curl -sSfL https://github.com/anza-xyz/agave/releases/download/v2.3.9/agave-install-init-x86_64-unknown-linux-gnu -o agave-install-init
           chmod +x agave-install-init
           ./agave-install-init v2.3.9
-          export PATH="$HOME/.local/share/solana/install/active_release/bin:$HOME/.local/share/agave/install/active_release/bin:$PATH"
-          # Sanity
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/share/agave/install/active_release/bin" >> "$GITHUB_PATH"
+      
+      - name: Show tools
+        run: |
+          set -eux
           rustc --version
           cargo --version
           which cargo-build-sbf
           cargo-build-sbf --version
-          # Build with tag lockfiles to avoid edition-2024 pulls
+      
+      - name: Build stake (locked)
+        run: |
+          set -eux
           cargo-build-sbf --manifest-path programs/stake/Cargo.toml -- --locked
+      
+      - name: Build vote (locked)
+        run: |
+          set -eux
           cargo-build-sbf --manifest-path programs/vote/Cargo.toml -- --locked
       
       - name: Upload artifacts
