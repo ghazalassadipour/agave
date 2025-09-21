@@ -30,12 +30,12 @@ jobs:
       - name: Build stake (locked)
         run: |
           set -eux
-          cargo-build-sbf --manifest-path programs/stake/Cargo.toml --locked
+          cargo-build-sbf --manifest-path programs/stake/Cargo.toml -- --locked
       
       - name: Build vote (locked)
         run: |
           set -eux
-          cargo-build-sbf --manifest-path programs/vote/Cargo.toml --locked
+          cargo-build-sbf --manifest-path programs/vote/Cargo.toml -- --locked
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
