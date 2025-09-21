@@ -12,30 +12,20 @@ jobs:
           ref: v2.3.9
           fetch-depth: 0
       
-      - name: Install Agave CLI v2.3.9
+      - name: Build stake+vote with Agave CLI inside container
         run: |
           set -eux
-          curl -sSfL https://github.com/anza-xyz/agave/releases/download/v2.3.9/agave-install-init-x86_64-unknown-linux-gnu -o agave-install-init
-          chmod +x agave-install-init
-          ./agave-install-init v2.3.9
-          echo "$HOME/.local/share/agave/install/active_release/bin" >> "$GITHUB_PATH"
-          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
-      
-      - name: Show tools
-        run: |
-          set -eux
-          which cargo-build-sbf
-          cargo-build-sbf --version
-      
-      - name: Build stake (locked)
-        run: |
-          set -eux
-          cargo-build-sbf --manifest-path programs/stake/Cargo.toml -- --locked
-      
-      - name: Build vote (locked)
-        run: |
-          set -eux
-          cargo-build-sbf --manifest-path programs/vote/Cargo.toml -- --locked
+          docker run --rm -v "$PWD:/work" -w /work --platform=linux/amd64 ubuntu:22.04 bash -lc '
+            apt-get update &&
+            apt-get install -y curl ca-certificates git pkg-config libssl-dev build-essential &&
+            curl -sSfL https://github.com/anza-xyz/agave/releases/download/v2.3.9/agave-install-init-x86_64-unknown-linux-gnu -o /usr/local/bin/agave-install-init &&
+            chmod +x /usr/local/bin/agave-install-init &&
+            /usr/local/bin/agave-install-init v2.3.9 &&
+            export PATH="$HOME/.local/share/agave/install/active_release/bin:$PATH" &&
+            cargo-build-sbf --manifest-path programs/stake/Cargo.toml -- --locked &&
+            cargo-build-sbf --manifest-path programs/vote/Cargo.toml -- --locked &&
+            ls -l target/deploy/*.so
+          '
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
