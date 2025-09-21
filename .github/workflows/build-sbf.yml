@@ -5,9 +5,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout v2.3.9
+      - name: Checkout upstream Agave v2.3.9
         uses: actions/checkout@v4
         with:
+          repository: anza-xyz/agave
           ref: v2.3.9
           fetch-depth: 0
       
