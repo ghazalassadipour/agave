@@ -1,22 +1,22 @@
-name: build-sbf-pre2024-pin-v4
+name: build-sbf-pre2024-pin-v5
 
 on:
   workflow_dispatch:
     inputs:
       program_dir:
-        description: "Path to the program crate or its parent (e.g. programs/stake OR programs/stake/program)"
+        description: "Root folder that contains the stake/vote code (e.g. programs/stake or programs/vote)"
         required: true
-        default: "programs/stake/program"
+        default: "programs/stake"
       artifact_prefix:
-        description: "Base name of the output .so (e.g. solana_stake_program or solana_vote_program)"
+        description: "Output base name (e.g. solana_stake_program or solana_vote_program)"
         required: true
         default: "solana_stake_program"
       agave_version:
-        description: "Agave release tag to use"
+        description: "Agave release tag"
         required: true
         default: "v2.3.9"
       pin_base64ct:
-        description: "Pre-2024 base64ct version to pin (latest 1.7.x recommended)"
+        description: "Pre-2024 base64ct (latest 1.7.x recommended)"
         required: true
         default: "1.7.3"
 
@@ -40,7 +40,9 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y curl ca-certificates git pkg-config libssl-dev build-essential clang llvm lld cmake
+          sudo apt-get install -y \
+            curl ca-certificates git pkg-config libssl-dev build-essential \
+            clang llvm lld cmake jq
 
       - name: Install Rust (host)
         run: |
@@ -79,49 +81,84 @@ jobs:
           command -v agave && agave --version || true
           command -v solana && solana --version || true
 
-      - name: Resolve program crate dir (prefer .../program)
-        id: resolve
+      - name: Locate on-chain crate (stake/vote)
+        id: locate
         run: |
           set -euxo pipefail
           PD="${PROGRAM_DIR}"
 
-          if [ ! -f "${PD}/Cargo.toml" ]; then
-            echo "No Cargo.toml at ${PD}" >&2
+          if [ ! -d "$PD" ]; then
+            echo "PROGRAM_DIR not found: $PD" >&2
             exit 1
           fi
 
-          # If given a workspace manifest, switch to its program subcrate
-          if grep -q '^\[workspace\]' "${PD}/Cargo.toml"; then
-            if [ -f "${PD}/program/Cargo.toml" ]; then
-              CRATE_DIR="${PD}/program"
-            else
-              echo "Given dir is a workspace and no 'program' subcrate was found at ${PD}/program" >&2
-              exit 1
-            fi
-          else
-            CRATE_DIR="${PD}"
+          # Collect candidate Cargo.toml files (depth 4 covers common layouts)
+          mapfile -t CANDIDATES < <(find "$PD" -maxdepth 4 -type f -name Cargo.toml | sort)
+
+          if [ "${#CANDIDATES[@]}" -eq 0 ]; then
+            echo "No Cargo.toml under $PD" >&2
+            exit 1
           fi
 
-          echo "CRATE_DIR=${CRATE_DIR}" | tee -a "$GITHUB_ENV"
+          choose_manifest() {
+            # 1) exact package name match (most reliable)
+            for m in "${CANDIDATES[@]}"; do
+              if grep -qE '^name\s*=\s*"'${ARTIFACT_PREFIX}'"' "$m"; then
+                echo "$m"; return 0
+              fi
+            done
+            # 2) looks like an on-chain crate (solana_program dep and cdylib crate-type)
+            for m in "${CANDIDATES[@]}"; do
+              if grep -q 'solana_program' "$m" && grep -q 'crate-type' "$m"; then
+                echo "$m"; return 0
+              fi
+            done
+            # 3) a non-workspace manifest at PD root
+            if [ -f "$PD/Cargo.toml" ] && ! grep -q '^\[workspace\]' "$PD/Cargo.toml"; then
+              echo "$PD/Cargo.toml"; return 0
+            fi
+            return 1
+          }
 
-          echo "Selected Cargo manifest:"
-          sed -n '1,60p' "${CRATE_DIR}/Cargo.toml" || true
+          MANIFEST="$(choose_manifest || true)"
+          if [ -z "$MANIFEST" ]; then
+            echo "Could not locate an on-chain crate manifest under $PD" >&2
+            echo "--- Found Cargo.toml files ---"
+            printf '%s\n' "${CANDIDATES[@]}" || true
+            echo "-----------------------------"
+            exit 1
+          fi
 
-      # --- Pin to a pre-2024 edition base64ct via the lockfile (no [patch]) ---
+          CRATE_DIR="$(dirname "$MANIFEST")"
+          echo "CRATE_DIR=$CRATE_DIR" | tee -a "$GITHUB_ENV"
 
-      - name: Pin base64ct via lockfile (in crate dir)
+          echo "Selected manifest: $MANIFEST"
+          sed -n '1,120p' "$MANIFEST" || true
+
+      - name: Discover workspace root
+        id: ws
         working-directory: ${{ env.CRATE_DIR }}
+        run: |
+          set -euxo pipefail
+          WSROOT="$(cargo metadata --format-version 1 --no-deps | jq -r '.workspace_root')"
+          echo "WSROOT=$WSROOT" | tee -a "$GITHUB_ENV"
+          echo "Workspace root: $WSROOT"
+          # Show workspace members (useful for debugging incorrect roots)
+          cargo metadata --format-version 1 --no-deps | jq '.packages | map(.name)'
+
+      # --- Pin to a pre-2024 edition base64ct in the *workspace* lockfile ---
+      - name: Pin base64ct in workspace lockfile
+        working-directory: ${{ env.WSROOT }}
         run: |
           set -euxo pipefail
           cargo generate-lockfile || true
           cargo update -p base64ct --precise "${PIN_BASE64CT}" || true
-
-          echo "Verifying base64ct pin in Cargo.lock (if present):"
           if [ -f Cargo.lock ]; then
+            echo "Lockfile snippet for base64ct:"
             awk '$0 ~ /^name = "base64ct"$/ {print; getline; print; getline; print}' Cargo.lock || true
           fi
 
-      # --- Build only the program crate with Cargo flags forwarded after `--` ---
+      # --- Build only the program crate; forward Cargo flags after `--` ---
       - name: Build (SBF) with --locked
         working-directory: ${{ env.CRATE_DIR }}
         run: |
@@ -132,7 +169,11 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p artifacts
-          so_path="$(find "${CRATE_DIR}/target" -type f -name "${ARTIFACT_PREFIX}*.so" -o -name "*_program*.so" | head -n1 || true)"
+          # Prefer an exact match by artifact_prefix; otherwise fall back to any *_program*.so
+          so_path="$(find "${CRATE_DIR}/target" -type f -name "${ARTIFACT_PREFIX}*.so" | head -n1 || true)"
+          if [ -z "${so_path}" ]; then
+            so_path="$(find "${CRATE_DIR}/target" -type f -name "*_program*.so" | head -n1 || true)"
+          fi
           if [ -z "${so_path}" ]; then
             echo "Could not find .so under ${CRATE_DIR}/target"
             find "${CRATE_DIR}/target" -maxdepth 4 -type f -name '*.so' -print || true
@@ -149,6 +190,7 @@ jobs:
           {
             echo "program_dir=${PROGRAM_DIR}"
             echo "crate_dir=${CRATE_DIR}"
+            echo "workspace_root=${WSROOT}"
             echo "artifact_prefix=${ARTIFACT_PREFIX}"
             echo "agave_version=${AGAVE_VERSION}"
             echo "pin_base64ct=${PIN_BASE64CT}"
