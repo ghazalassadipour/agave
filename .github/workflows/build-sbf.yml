@@ -1,12 +1,12 @@
-name: build-sbf-pre2024-pin-v3
+name: build-sbf-pre2024-pin-v4
 
 on:
   workflow_dispatch:
     inputs:
       program_dir:
-        description: "Path to the program crate (e.g. programs/stake or programs/vote)"
+        description: "Path to the program crate or its parent (e.g. programs/stake OR programs/stake/program)"
         required: true
-        default: "programs/stake"
+        default: "programs/stake/program"
       artifact_prefix:
         description: "Base name of the output .so (e.g. solana_stake_program or solana_vote_program)"
         required: true
@@ -79,35 +79,51 @@ jobs:
           command -v agave && agave --version || true
           command -v solana && solana --version || true
 
-      # --- Pin to a pre-2024 edition base64ct via the lockfile (no [patch]) ---
-
-      - name: Pin base64ct via lockfile (workspace root first)
-        working-directory: ${{ github.workspace }}
+      - name: Resolve program crate dir (prefer .../program)
+        id: resolve
         run: |
           set -euxo pipefail
-          if [ -f Cargo.toml ]; then
-            cargo generate-lockfile || true
-            cargo update -p base64ct --precise "${PIN_BASE64CT}" || true
+          PD="${PROGRAM_DIR}"
+
+          if [ ! -f "${PD}/Cargo.toml" ]; then
+            echo "No Cargo.toml at ${PD}" >&2
+            exit 1
           fi
+
+          # If given a workspace manifest, switch to its program subcrate
+          if grep -q '^\[workspace\]' "${PD}/Cargo.toml"; then
+            if [ -f "${PD}/program/Cargo.toml" ]; then
+              CRATE_DIR="${PD}/program"
+            else
+              echo "Given dir is a workspace and no 'program' subcrate was found at ${PD}/program" >&2
+              exit 1
+            fi
+          else
+            CRATE_DIR="${PD}"
+          fi
+
+          echo "CRATE_DIR=${CRATE_DIR}" | tee -a "$GITHUB_ENV"
+
+          echo "Selected Cargo manifest:"
+          sed -n '1,60p' "${CRATE_DIR}/Cargo.toml" || true
+
+      # --- Pin to a pre-2024 edition base64ct via the lockfile (no [patch]) ---
+
+      - name: Pin base64ct via lockfile (in crate dir)
+        working-directory: ${{ env.CRATE_DIR }}
+        run: |
+          set -euxo pipefail
+          cargo generate-lockfile || true
+          cargo update -p base64ct --precise "${PIN_BASE64CT}" || true
+
+          echo "Verifying base64ct pin in Cargo.lock (if present):"
           if [ -f Cargo.lock ]; then
             awk '$0 ~ /^name = "base64ct"$/ {print; getline; print; getline; print}' Cargo.lock || true
           fi
 
-      - name: Pin base64ct via lockfile (program dir fallback)
-        working-directory: ${{ env.PROGRAM_DIR }}
-        run: |
-          set -euxo pipefail
-          if [ -f Cargo.toml ]; then
-            cargo generate-lockfile || true
-            cargo update -p base64ct --precise "${PIN_BASE64CT}" || true
-            if [ -f Cargo.lock ]; then
-              awk '$0 ~ /^name = "base64ct"$/ {print; getline; print; getline; print}' Cargo.lock || true
-            fi
-          fi
-
-      # --- Build with Cargo flags forwarded after `--` ---
+      # --- Build only the program crate with Cargo flags forwarded after `--` ---
       - name: Build (SBF) with --locked
-        working-directory: ${{ env.PROGRAM_DIR }}
+        working-directory: ${{ env.CRATE_DIR }}
         run: |
           set -euxo pipefail
           cargo-build-sbf -- --locked
@@ -116,10 +132,10 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p artifacts
-          so_path="$(find "${PROGRAM_DIR}/target" -type f -name "${ARTIFACT_PREFIX}*.so" -o -name "*_program*.so" | head -n1 || true)"
+          so_path="$(find "${CRATE_DIR}/target" -type f -name "${ARTIFACT_PREFIX}*.so" -o -name "*_program*.so" | head -n1 || true)"
           if [ -z "${so_path}" ]; then
-            echo "Could not find .so under ${PROGRAM_DIR}/target"
-            find "${PROGRAM_DIR}/target" -maxdepth 4 -type f -name '*.so' -print || true
+            echo "Could not find .so under ${CRATE_DIR}/target"
+            find "${CRATE_DIR}/target" -maxdepth 4 -type f -name '*.so' -print || true
             exit 1
           fi
 
@@ -132,6 +148,7 @@ jobs:
           (cargo-build-sbf --version || true) > artifacts/cargo_build_sbf_version.txt
           {
             echo "program_dir=${PROGRAM_DIR}"
+            echo "crate_dir=${CRATE_DIR}"
             echo "artifact_prefix=${ARTIFACT_PREFIX}"
             echo "agave_version=${AGAVE_VERSION}"
             echo "pin_base64ct=${PIN_BASE64CT}"
