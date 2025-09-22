@@ -1,16 +1,11 @@
-name: build-sbf
+name: build-stake-sbf
 on:
   workflow_dispatch:
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout upstream Agave v2.3.9
-        uses: actions/checkout@v4
-        with:
-          repository: anza-xyz/agave
-          ref: v2.3.9
-          fetch-depth: 0
+      - uses: actions/checkout@v4
       
       - name: Install system deps
         run: |
@@ -24,7 +19,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       
-      - name: Install Agave CLI v2.3.9
+      - name: Install Agave CLI (v2.3.9)
         run: |
           set -eux
           curl -sSfL https://github.com/anza-xyz/agave/releases/download/v2.3.9/agave-install-init-x86_64-unknown-linux-gnu -o agave-install-init
@@ -33,26 +28,13 @@ jobs:
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/share/agave/install/active_release/bin" >> "$GITHUB_PATH"
       
-      - name: Show tools
+      - name: Build stake (SBF)
         run: |
           set -eux
-          rustc --version
-          cargo --version
-          which cargo-build-sbf
-          cargo-build-sbf --version
+          cargo-build-sbf
       
-      - name: Build stake (locked)
-        run: |
-          set -eux
-          cargo-build-sbf --manifest-path programs/stake/Cargo.toml -- --locked
-      
-      - name: Build vote (locked)
-        run: |
-          set -eux
-          cargo-build-sbf --manifest-path programs/vote/Cargo.toml -- --locked
-      
-      - name: Upload artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sbf-artifacts
-          path: target/deploy/*.so
+          name: solana_stake_program.so
+          path: target/deploy/solana_stake_program.so
