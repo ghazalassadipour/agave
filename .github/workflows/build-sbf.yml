@@ -1,4 +1,4 @@
-name: build-sbf-with-pre-2024-pin
+name: build-sbf-pre2024-pin-v2
 
 on:
   workflow_dispatch:
@@ -59,11 +59,9 @@ jobs:
           chmod +x agave-install-init
           ./agave-install-init "${AGAVE_VERSION}"
 
-          # Candidate install paths
           AGAVE_BIN="$HOME/.local/share/agave/install/active_release/bin"
           SOLANA_BIN="$HOME/.local/share/solana/install/active_release/bin"
 
-          # Prefer Agave; else Solana
           if [ -x "$AGAVE_BIN/cargo-build-sbf" ]; then
             echo "$AGAVE_BIN" >> "$GITHUB_PATH"
             export PATH="$AGAVE_BIN:$PATH"
@@ -71,7 +69,7 @@ jobs:
             echo "$SOLANA_BIN" >> "$GITHUB_PATH"
             export PATH="$SOLANA_BIN:$PATH"
           else
-            echo "cargo-build-sbf not found after Agave install."
+            echo "cargo-build-sbf not found after install."
             find "$HOME/.local/share" -maxdepth 6 -type f -name 'cargo-build-sbf' -print || true
             exit 1
           fi
@@ -81,41 +79,57 @@ jobs:
           command -v agave && agave --version || true
           command -v solana && solana --version || true
 
-      - name: Freeze deps to pre-2024 editions (pin base64ct)
+      # --- Pin to a pre-2024 edition base64ct using the lockfile (no [patch]) ---
+
+      - name: Pin base64ct via lockfile (workspace root first)
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euxo pipefail
+
+          # If this is a workspace, the lockfile typically lives at repo root.
+          # Generate it if missing, then pin base64ct to a pre-2024 version.
+          if [ -f Cargo.toml ]; then
+            cargo generate-lockfile || true
+            cargo update -p base64ct --precise "${PIN_BASE64CT}" || true
+          fi
+
+          echo "Checking lockfile at repo root (if present) for base64ct=${PIN_BASE64CT}:"
+          if [ -f Cargo.lock ]; then
+            awk '
+              $0 ~ /^name = "base64ct"$/ {print; getline; print; getline; print}
+            ' Cargo.lock || true
+          fi
+
+      - name: Pin base64ct via lockfile (program dir fallback)
         working-directory: ${{ env.PROGRAM_DIR }}
         run: |
           set -euxo pipefail
 
-          # Create a local patch so the resolver never tries base64ct 1.8.x (edition 2024)
-          mkdir -p .cargo
-          cat > .cargo/config.toml <<EOF
-          [patch.crates-io]
-          base64ct = "=${PIN_BASE64CT}"
-          EOF
+          # If the program is NOT in the workspace above (standalone crate),
+          # maintain its own lockfile and pin there.
+          if [ -f Cargo.toml ]; then
+            cargo generate-lockfile || true
+            cargo update -p base64ct --precise "${PIN_BASE64CT}" || true
 
-          # Also place the patch at repo root in case the program participates in a workspace above
-          mkdir -p "$GITHUB_WORKSPACE/.cargo"
-          cp .cargo/config.toml "$GITHUB_WORKSPACE/.cargo/config.toml"
+            echo "Checking lockfile in ${PROGRAM_DIR} for base64ct=${PIN_BASE64CT}:"
+            if [ -f Cargo.lock ]; then
+              awk '
+                $0 ~ /^name = "base64ct"$/ {print; getline; print; getline; print}
+              ' Cargo.lock || true
+            fi
+          fi
 
-          # Generate lockfile and then explicitly update base64ct to the pinned pre-2024 version
-          cargo generate-lockfile
-          cargo update -p base64ct --precise "${PIN_BASE64CT}" || true
-
-          echo "Pinned base64ct version in Cargo.lock (if present):"
-          grep -A2 -nE '^name = "base64ct"$' Cargo.lock || true
-
-      - name: Build (SBF)
+      # --- Build with the pinned lockfile ---
+      - name: Build (SBF) with --locked
         working-directory: ${{ env.PROGRAM_DIR }}
         run: |
           set -euxo pipefail
-          # Ensure we use the Agave subcommand, honoring the lockfile
           cargo-build-sbf --locked
 
       - name: Collect artifact
         run: |
           set -euxo pipefail
           mkdir -p artifacts
-          # Look for the produced .so under the program's target dir (covers all SBF target layouts)
           so_path="$(find "${PROGRAM_DIR}/target" -type f -name "${ARTIFACT_PREFIX}*.so" -o -name "*_program*.so" | head -n1 || true)"
           if [ -z "${so_path}" ]; then
             echo "Could not find .so under ${PROGRAM_DIR}/target"
@@ -125,15 +139,17 @@ jobs:
 
           cp "${so_path}" "artifacts/${ARTIFACT_PREFIX}.so"
 
-          # Record provenance
+          # Provenance
           git rev-parse HEAD > artifacts/git_commit.txt
           (agave --version || true) > artifacts/agave_version.txt
           (solana --version || true) > artifacts/solana_version.txt
           (cargo-build-sbf --version || true) > artifacts/cargo_build_sbf_version.txt
-          echo "program_dir=${PROGRAM_DIR}" > artifacts/build_meta.txt
-          echo "artifact_prefix=${ARTIFACT_PREFIX}" >> artifacts/build_meta.txt
-          echo "agave_version=${AGAVE_VERSION}" >> artifacts/build_meta.txt
-          echo "pin_base64ct=${PIN_BASE64CT}" >> artifacts/build_meta.txt
+          {
+            echo "program_dir=${PROGRAM_DIR}"
+            echo "artifact_prefix=${ARTIFACT_PREFIX}"
+            echo "agave_version=${AGAVE_VERSION}"
+            echo "pin_base64ct=${PIN_BASE64CT}"
+          } > artifacts/build_meta.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
