@@ -1,5 +1,4 @@
 name: build-sbf-pre2024-pin-v6
-
 on:
   workflow_dispatch:
     inputs:
