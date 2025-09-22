@@ -3,29 +3,23 @@ on:
   workflow_dispatch:
     inputs:
       agave_version:
-        description: "Agave release tag to use (e.g. v2.3.9)"
+        description: "Agave tag (e.g. v2.3.9)"
         required: true
         default: v2.3.9
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # If this repo tracks Agave directly, you can also pin a tag here:
-          # ref: ${{ github.event.inputs.agave_version }}
 
       - name: System deps
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y \
-            curl ca-certificates git pkg-config libssl-dev build-essential \
-            clang llvm lld cmake
+          sudo apt-get install -y curl ca-certificates git pkg-config libssl-dev build-essential clang llvm lld cmake
 
       - name: Install Rust (host)
         run: |
@@ -33,6 +27,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           source "$HOME/.cargo/env"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustup default nightly
           rustup --version
           cargo --version
 
@@ -44,15 +39,21 @@ jobs:
           curl -sSfL "https://github.com/anza-xyz/agave/releases/download/${AGAVE_VERSION}/agave-install-init-x86_64-unknown-linux-gnu" -o agave-install-init
           chmod +x agave-install-init
           ./agave-install-init "${AGAVE_VERSION}"
-          # Prefer Agave toolchain on PATH
-          echo "$HOME/.local/share/agave/install/active_release/bin" >> "$GITHUB_PATH"
 
-      - name: Tooling versions
-        run: |
-          set -euxo pipefail
+          AGAVE_BIN="$HOME/.local/share/agave/install/active_release/bin"
+          SOLANA_BIN="$HOME/.local/share/solana/install/active_release/bin"
+          if [ -x "$AGAVE_BIN/cargo-build-sbf" ]; then
+            export PATH="$AGAVE_BIN:$PATH"; echo "$AGAVE_BIN" >> "$GITHUB_PATH"
+          elif [ -x "$SOLANA_BIN/cargo-build-sbf" ]; then
+            export PATH="$SOLANA_BIN:$PATH"; echo "$SOLANA_BIN" >> "$GITHUB_PATH"
+          else
+            echo "cargo-build-sbf not found after install"; find "$HOME/.local/share" -maxdepth 6 -name 'cargo-build-sbf' -print; exit 1
+          fi
+
           which cargo-build-sbf
           cargo-build-sbf --version || true
-          agave --version || true
+          command -v agave && agave --version || true
+          command -v solana && solana --version || true
 
       - name: Build stake (SBF)
         working-directory: programs/stake
@@ -64,19 +65,14 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p artifacts
-          # Try common locations; pick the first match
           so_path="$(find programs/stake/target -type f -name 'solana_stake_program*.so' | head -n1)"
-          if [ -z "$so_path" ]; then
-            echo "Stake .so not found under programs/stake/target"; exit 1
-          fi
+          [ -n "$so_path" ] || { echo "Stake .so not found"; exit 1; }
           cp "$so_path" artifacts/solana_stake_program.so
-          # Record provenance for apples-to-apples comparisons
           git rev-parse HEAD > artifacts/git_commit.txt
-          agave --version > artifacts/agave_version.txt || true
-          cargo-build-sbf --version > artifacts/cargo_build_sbf_version.txt || true
+          (agave --version || true) > artifacts/agave_version.txt
+          (cargo-build-sbf --version || true) > artifacts/cargo_build_sbf_version.txt
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: stake-sbf-${{ github.event.inputs.agave_version }}
           path: artifacts/*
