@@ -1,4 +1,4 @@
-name: build-sbf-pre2024-pin-v2
+name: build-sbf-pre2024-pin-v3
 
 on:
   workflow_dispatch:
@@ -79,52 +79,38 @@ jobs:
           command -v agave && agave --version || true
           command -v solana && solana --version || true
 
-      # --- Pin to a pre-2024 edition base64ct using the lockfile (no [patch]) ---
+      # --- Pin to a pre-2024 edition base64ct via the lockfile (no [patch]) ---
 
       - name: Pin base64ct via lockfile (workspace root first)
         working-directory: ${{ github.workspace }}
         run: |
           set -euxo pipefail
-
-          # If this is a workspace, the lockfile typically lives at repo root.
-          # Generate it if missing, then pin base64ct to a pre-2024 version.
           if [ -f Cargo.toml ]; then
             cargo generate-lockfile || true
             cargo update -p base64ct --precise "${PIN_BASE64CT}" || true
           fi
-
-          echo "Checking lockfile at repo root (if present) for base64ct=${PIN_BASE64CT}:"
           if [ -f Cargo.lock ]; then
-            awk '
-              $0 ~ /^name = "base64ct"$/ {print; getline; print; getline; print}
-            ' Cargo.lock || true
+            awk '$0 ~ /^name = "base64ct"$/ {print; getline; print; getline; print}' Cargo.lock || true
           fi
 
       - name: Pin base64ct via lockfile (program dir fallback)
         working-directory: ${{ env.PROGRAM_DIR }}
         run: |
           set -euxo pipefail
-
-          # If the program is NOT in the workspace above (standalone crate),
-          # maintain its own lockfile and pin there.
           if [ -f Cargo.toml ]; then
             cargo generate-lockfile || true
             cargo update -p base64ct --precise "${PIN_BASE64CT}" || true
-
-            echo "Checking lockfile in ${PROGRAM_DIR} for base64ct=${PIN_BASE64CT}:"
             if [ -f Cargo.lock ]; then
-              awk '
-                $0 ~ /^name = "base64ct"$/ {print; getline; print; getline; print}
-              ' Cargo.lock || true
+              awk '$0 ~ /^name = "base64ct"$/ {print; getline; print; getline; print}' Cargo.lock || true
             fi
           fi
 
-      # --- Build with the pinned lockfile ---
+      # --- Build with Cargo flags forwarded after `--` ---
       - name: Build (SBF) with --locked
         working-directory: ${{ env.PROGRAM_DIR }}
         run: |
           set -euxo pipefail
-          cargo-build-sbf --locked
+          cargo-build-sbf -- --locked
 
       - name: Collect artifact
         run: |
