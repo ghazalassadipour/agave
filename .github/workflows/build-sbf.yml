@@ -236,8 +236,8 @@ PY
             echo "pin_base64ct=${PIN_BASE64CT}"
           } > artifacts/build_meta.txt
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      #- name: Upload artifact
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_PREFIX }}-${{ env.AGAVE_VERSION }}
           path: artifacts/*
