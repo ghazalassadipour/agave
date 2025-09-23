@@ -1,22 +1,22 @@
-name: build-sbf-with-pre-2024-pin
+name: build-sbf-pre2024-pin-v6
 
 on:
   workflow_dispatch:
     inputs:
       program_dir:
-        description: "Path to the program crate (e.g. programs/stake or programs/vote)"
+        description: "Root folder that contains the stake/vote code (e.g. programs/stake or programs/vote)"
         required: true
         default: "programs/stake"
       artifact_prefix:
-        description: "Base name of the output .so (e.g. solana_stake_program or solana_vote_program)"
+        description: "Output base name (e.g. solana_stake_program or solana_vote_program)"
         required: true
         default: "solana_stake_program"
       agave_version:
-        description: "Agave release tag to use"
+        description: "Agave release tag"
         required: true
         default: "v2.3.9"
       pin_base64ct:
-        description: "Pre-2024 base64ct version to pin (latest 1.7.x recommended)"
+        description: "Pre-2024 base64ct (latest 1.7.x recommended)"
         required: true
         default: "1.7.3"
 
@@ -40,7 +40,9 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y curl ca-certificates git pkg-config libssl-dev build-essential clang llvm lld cmake
+          sudo apt-get install -y \
+            curl ca-certificates git pkg-config libssl-dev build-essential \
+            clang llvm lld cmake jq
 
       - name: Install Rust (host)
         run: |
@@ -59,11 +61,9 @@ jobs:
           chmod +x agave-install-init
           ./agave-install-init "${AGAVE_VERSION}"
 
-          # Candidate install paths
           AGAVE_BIN="$HOME/.local/share/agave/install/active_release/bin"
           SOLANA_BIN="$HOME/.local/share/solana/install/active_release/bin"
 
-          # Prefer Agave; else Solana
           if [ -x "$AGAVE_BIN/cargo-build-sbf" ]; then
             echo "$AGAVE_BIN" >> "$GITHUB_PATH"
             export PATH="$AGAVE_BIN:$PATH"
@@ -71,7 +71,7 @@ jobs:
             echo "$SOLANA_BIN" >> "$GITHUB_PATH"
             export PATH="$SOLANA_BIN:$PATH"
           else
-            echo "cargo-build-sbf not found after Agave install."
+            echo "cargo-build-sbf not found after install."
             find "$HOME/.local/share" -maxdepth 6 -type f -name 'cargo-build-sbf' -print || true
             exit 1
           fi
@@ -81,59 +81,161 @@ jobs:
           command -v agave && agave --version || true
           command -v solana && solana --version || true
 
-      - name: Freeze deps to pre-2024 editions (pin base64ct)
-        working-directory: ${{ env.PROGRAM_DIR }}
+      - name: Locate on-chain crate (stake/vote)
+        id: locate
         run: |
           set -euxo pipefail
+          PD="${PROGRAM_DIR}"
 
-          # Create a local patch so the resolver never tries base64ct 1.8.x (edition 2024)
-          mkdir -p .cargo
-          cat > .cargo/config.toml <<EOF
-          [patch.crates-io]
-          base64ct = "=${PIN_BASE64CT}"
-          EOF
+          if [ ! -d "$PD" ]; then
+            echo "PROGRAM_DIR not found: $PD" >&2
+            exit 1
+          fi
 
-          # Also place the patch at repo root in case the program participates in a workspace above
-          mkdir -p "$GITHUB_WORKSPACE/.cargo"
-          cp .cargo/config.toml "$GITHUB_WORKSPACE/.cargo/config.toml"
+          # All candidate Cargo.toml files under program_dir
+          mapfile -t CANDIDATES < <(find "$PD" -maxdepth 4 -type f -name Cargo.toml | sort)
+          if [ "${#CANDIDATES[@]}" -eq 0 ]; then
+            echo "No Cargo.toml under $PD" >&2
+            exit 1
+          fi
 
-          # Generate lockfile and then explicitly update base64ct to the pinned pre-2024 version
-          cargo generate-lockfile
+          choose_manifest() {
+            # 1) prefer package name matching artifact_prefix
+            for m in "${CANDIDATES[@]}"; do
+              if grep -qE '^name\s*=\s*"'${ARTIFACT_PREFIX}'"' "$m"; then
+                echo "$m"; return 0
+              fi
+            done
+            # 2) looks like SBF on-chain crate: depends on solana_program and declares cdylib
+            for m in "${CANDIDATES[@]}"; do
+              if grep -q 'solana_program' "$m" && grep -q 'crate-type' "$m"; then
+                echo "$m"; return 0
+              fi
+            done
+            # 3) fallback to a non-workspace manifest at PD root
+            if [ -f "$PD/Cargo.toml" ] && ! grep -q '^\[workspace\]' "$PD/Cargo.toml"; then
+              echo "$PD/Cargo.toml"; return 0
+            fi
+            return 1
+          }
+
+          MANIFEST="$(choose_manifest || true)"
+          if [ -z "$MANIFEST" ]; then
+            echo "Could not locate an on-chain crate manifest under $PD" >&2
+            printf '%s\n' "${CANDIDATES[@]}" || true
+            exit 1
+          fi
+
+          CRATE_DIR="$(dirname "$MANIFEST")"
+          echo "CRATE_DIR=$CRATE_DIR" | tee -a "$GITHUB_ENV"
+          echo "Selected manifest: $MANIFEST"
+          sed -n '1,120p' "$MANIFEST" || true
+
+      - name: Discover workspace root
+        id: ws
+        working-directory: ${{ env.CRATE_DIR }}
+        run: |
+          set -euxo pipefail
+          WSROOT="$(cargo metadata --format-version 1 --no-deps | jq -r '.workspace_root')"
+          echo "WSROOT=$WSROOT" | tee -a "$GITHUB_ENV"
+          echo "Workspace root: $WSROOT"
+          cargo metadata --format-version 1 --no-deps | jq '.packages | map(.name)'
+
+      # Pin base64ct to pre-2024 in the workspace lockfile
+      - name: Pin base64ct in workspace lockfile
+        working-directory: ${{ env.WSROOT }}
+        run: |
+          set -euxo pipefail
+          cargo generate-lockfile || true
           cargo update -p base64ct --precise "${PIN_BASE64CT}" || true
+          if [ -f Cargo.lock ]; then
+            echo "Lockfile snippet for base64ct:"
+            awk '$0 ~ /^name = "base64ct"$/ {print; getline; print; getline; print}' Cargo.lock || true
+          fi
 
-          echo "Pinned base64ct version in Cargo.lock (if present):"
-          grep -A2 -nE '^name = "base64ct"$' Cargo.lock || true
-
-      - name: Build (SBF)
-        working-directory: ${{ env.PROGRAM_DIR }}
+      # Force getrandom 'custom' backend for Solana target (only modifies CI workspace)
+      - name: Ensure getrandom(custom) for Solana
+        working-directory: ${{ env.CRATE_DIR }}
         run: |
           set -euxo pipefail
-          # Ensure we use the Agave subcommand, honoring the lockfile
-          cargo-build-sbf --locked
+          python3 - <<'PY'
+import re, sys, pathlib
+p = pathlib.Path("Cargo.toml")
+s = p.read_text()
+hdr = r"^\[target\.'cfg\(target_os\s*=\s*\"solana\"\)'\.dependencies\]\s*$"
+hdr_re = re.compile(hdr, re.MULTILINE)
+sec_re = re.compile(r"^\[.*\]\s*$", re.MULTILINE)
+
+if hdr_re.search(s):
+    # Find section boundaries
+    start = hdr_re.search(s).end()
+    m2 = sec_re.search(s, start)
+    end = m2.start() if m2 else len(s)
+    body = s[start:end]
+    if re.search(r"^\s*getrandom\s*=", body, re.MULTILINE):
+        # already present; nothing to do
+        pass
+    else:
+        ins = 'getrandom = { version = "0.2", default-features = false, features = ["custom"] }\n'
+        s = s[:end] + ins + s[end:]
+else:
+    # Append new target-specific section
+    ins = '\n[target.\'cfg(target_os = "solana")\'.dependencies]\n' \
+          'getrandom = { version = "0.2", default-features = false, features = ["custom"] }\n'
+    s = s + ins
+
+p.write_text(s)
+print("Injected/ensured target-specific getrandom(custom).", file=sys.stderr)
+PY
+
+          echo "Preview of injected section:"
+          sed -n '1,140p' Cargo.toml
+
+      # Build with locked deps; on specific getrandom error, retry with --no-default-features
+      - name: Build (SBF) with fallback
+        working-directory: ${{ env.CRATE_DIR }}
+        run: |
+          set -euxo pipefail
+          set +e
+          cargo-build-sbf -- --locked 2>&1 | tee build.log
+          st=${PIPESTATUS[0]}
+          set -e
+          if [ $st -ne 0 ] && grep -q "getrandom/#unsupported-targets" build.log; then
+            echo "Retry: getrandom unsupported -> building with --no-default-features"
+            cargo-build-sbf -- --locked --no-default-features
+          else
+            exit $st
+          fi
 
       - name: Collect artifact
         run: |
           set -euxo pipefail
           mkdir -p artifacts
-          # Look for the produced .so under the program's target dir (covers all SBF target layouts)
-          so_path="$(find "${PROGRAM_DIR}/target" -type f -name "${ARTIFACT_PREFIX}*.so" -o -name "*_program*.so" | head -n1 || true)"
+          so_path="$(find "${CRATE_DIR}/target" -type f -name "${ARTIFACT_PREFIX}*.so" | head -n1 || true)"
           if [ -z "${so_path}" ]; then
-            echo "Could not find .so under ${PROGRAM_DIR}/target"
-            find "${PROGRAM_DIR}/target" -maxdepth 4 -type f -name '*.so' -print || true
+            so_path="$(find "${CRATE_DIR}/target" -type f -name "*_program*.so" | head -n1 || true)"
+          fi
+          if [ -z "${so_path}" ]; then
+            echo "Could not find .so under ${CRATE_DIR}/target"
+            find "${CRATE_DIR}/target" -maxdepth 4 -type f -name '*.so' -print || true
             exit 1
           fi
 
           cp "${so_path}" "artifacts/${ARTIFACT_PREFIX}.so"
 
-          # Record provenance
+          # Provenance
           git rev-parse HEAD > artifacts/git_commit.txt
           (agave --version || true) > artifacts/agave_version.txt
           (solana --version || true) > artifacts/solana_version.txt
           (cargo-build-sbf --version || true) > artifacts/cargo_build_sbf_version.txt
-          echo "program_dir=${PROGRAM_DIR}" > artifacts/build_meta.txt
-          echo "artifact_prefix=${ARTIFACT_PREFIX}" >> artifacts/build_meta.txt
-          echo "agave_version=${AGAVE_VERSION}" >> artifacts/build_meta.txt
-          echo "pin_base64ct=${PIN_BASE64CT}" >> artifacts/build_meta.txt
+          {
+            echo "program_dir=${PROGRAM_DIR}"
+            echo "crate_dir=${CRATE_DIR}"
+            echo "workspace_root=${WSROOT}"
+            echo "artifact_prefix=${ARTIFACT_PREFIX}"
+            echo "agave_version=${AGAVE_VERSION}"
+            echo "pin_base64ct=${PIN_BASE64CT}"
+          } > artifacts/build_meta.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
