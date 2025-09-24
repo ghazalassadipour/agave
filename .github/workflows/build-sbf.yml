@@ -1,4 +1,4 @@
-name: build-sbf-pre2024-pin-v7
+name: build-sbf-pre2024-pin-v8
 
 on:
   workflow_dispatch:
@@ -85,38 +85,50 @@ jobs:
           command -v agave && agave --version || true
           command -v solana && solana --version || true
 
-      - name: Locate on-chain crate (stake/vote)
+      - name: Locate on-chain crate (stake/vote) – hyphen/underscore aware
         id: locate
         run: |
           set -euxo pipefail
           PD="${PROGRAM_DIR}"
+          WANT_LIB="${ARTIFACT_PREFIX}"                # e.g., solana_stake_program
+          WANT_PKG="${ARTIFACT_PREFIX//_/-}"           # e.g., solana-stake-program
 
           if [ ! -d "$PD" ]; then
             echo "PROGRAM_DIR not found: $PD" >&2
             exit 1
           fi
 
-          # All candidate Cargo.toml files under program_dir
           mapfile -t CANDIDATES < <(find "$PD" -maxdepth 4 -type f -name Cargo.toml | sort)
           if [ "${#CANDIDATES[@]}" -eq 0 ]; then
             echo "No Cargo.toml under $PD" >&2
             exit 1
           fi
 
+          # helper: extract value for key "name" in a section [SECTION]..next-section
+          in_section() { # $1=manifest $2=SECTION $3=NAME_TO_MATCH
+            sed -n "/^\[$2\]/,/^\[/p" "$1" | grep -qE "^[[:space:]]*name[[:space:]]*=[[:space:]]*\"$3\""
+          }
+
           choose_manifest() {
-            # 1) prefer package name matching artifact_prefix (under [package])
+            # 1) Prefer exact [package].name == WANT_PKG (hyphen form)
             for m in "${CANDIDATES[@]}"; do
-              if awk '/^\[package\]/{p=1;next}/^\[/{p=0} p && $0 ~ /^\s*name\s*=\s*"'${ARTIFACT_PREFIX}'"$/ {exit 0} END{exit 1}' "$m"; then
+              if in_section "$m" "package" "$WANT_PKG"; then
                 echo "$m"; return 0
               fi
             done
-            # 2) looks like SBF on-chain crate: depends on solana[-_]program and declares cdylib
+            # 2) Prefer exact [lib].name == WANT_LIB (underscore form)
+            for m in "${CANDIDATES[@]}"; do
+              if in_section "$m" "lib" "$WANT_LIB"; then
+                echo "$m"; return 0
+              fi
+            done
+            # 3) Looks like an SBF on-chain crate: depends on solana[_-]program and has cdylib crate-type
             for m in "${CANDIDATES[@]}"; do
               if grep -Eq 'solana[-_]program' "$m" && grep -q 'crate-type' "$m"; then
                 echo "$m"; return 0
               fi
             done
-            # 3) fallback to a non-workspace manifest at PD root
+            # 4) Fallback to non-workspace Cargo.toml at PD root
             if [ -f "$PD/Cargo.toml" ] && ! grep -q '^\[workspace\]' "$PD/Cargo.toml"; then
               echo "$PD/Cargo.toml"; return 0
             fi
@@ -133,7 +145,7 @@ jobs:
           CRATE_DIR="$(dirname "$MANIFEST")"
           echo "CRATE_DIR=$CRATE_DIR" | tee -a "$GITHUB_ENV"
           echo "Selected manifest: $MANIFEST"
-          sed -n '1,120p' "$MANIFEST" || true
+          sed -n '1,140p' "$MANIFEST" || true
 
       - name: Discover workspace root
         id: ws
@@ -145,7 +157,7 @@ jobs:
           echo "Workspace root: $WSROOT"
           cargo metadata --format-version 1 --no-deps | jq '.packages | map(.name)'
 
-      - name: Pin base64ct in workspace lockfile
+      - name: Pin base64ct (pre-2024) in workspace lockfile
         working-directory: ${{ env.WSROOT }}
         run: |
           set -euxo pipefail
@@ -156,41 +168,8 @@ jobs:
             awk '$0 ~ /^name = "base64ct"$/ {print; getline; print; getline; print}' Cargo.lock || true
           fi
 
-      - name: Ensure getrandom(custom) for Solana
-        working-directory: ${{ env.CRATE_DIR }}
-        run: |
-          set -euxo pipefail
-          python3 - <<'PY'
-          import re, sys, pathlib
-          p = pathlib.Path("Cargo.toml")
-          s = p.read_text()
-          hdr = r"^\[target\.'cfg\(target_os\s*=\s*\"solana\"\)'\.dependencies\]\s*$"
-          hdr_re = re.compile(hdr, re.MULTILINE)
-          sec_re = re.compile(r"^\[.*\]\s*$", re.MULTILINE)
-
-          if hdr_re.search(s):
-              start = hdr_re.search(s).end()
-              m2 = sec_re.search(s, start)
-              end = m2.start() if m2 else len(s)
-              body = s[start:end]
-              if re.search(r"^\s*getrandom\s*=", body, re.MULTILINE):
-                  pass
-              else:
-                  ins = 'getrandom = { version = "0.2", default-features = false, features = ["custom"] }\n'
-                  s = s[:end] + ins + s[end:]
-          else:
-              ins = '\n[target.\'cfg(target_os = "solana")\'.dependencies]\n' \
-                    'getrandom = { version = "0.2", default-features = false, features = ["custom"] }\n'
-              s = s + ins
-
-          p.write_text(s)
-          print("Injected/ensured target-specific getrandom(custom).", file=sys.stderr)
-          PY
-
-          echo "Preview of injected section:"
-          sed -n '1,160p' Cargo.toml
-
-      - name: Build (SBF) with fallback
+      - name: Build (SBF) with --locked
+        id: build
         working-directory: ${{ env.CRATE_DIR }}
         run: |
           set -euxo pipefail
@@ -198,12 +177,20 @@ jobs:
           cargo-build-sbf -- --locked 2>&1 | tee build.log
           st=${PIPESTATUS[0]}
           set -e
-          if [ $st -ne 0 ] && grep -q "docs.rs/getrandom/#unsupported-targets" build.log; then
-            echo "Retry: getrandom unsupported -> building with --no-default-features"
-            cargo-build-sbf -- --locked --no-default-features
-          else
-            exit $st
-          fi
+          echo "build_status=$st" | tee -a "$GITHUB_OUTPUT"
+
+      - name: On failure, show who pulls getrandom (reverse dep tree)
+        if: steps.build.outputs.build_status != '0'
+        working-directory: ${{ env.CRATE_DIR }}
+        run: |
+          set -euxo pipefail
+          cargo install cargo-tree || true
+          echo "=== cargo tree -i getrandom (who depends on it) ==="
+          cargo tree -i getrandom -e features || true
+          echo "=== end cargo tree ==="
+          echo "Last 200 lines of build.log (for quick triage):"
+          tail -n 200 build.log || true
+          exit 1
 
       - name: Collect artifact
         run: |
