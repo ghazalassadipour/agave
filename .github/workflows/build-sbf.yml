@@ -1,33 +1,58 @@
-name: build-stake-bpf
+name: build-sbf-pre2024-pin-v9
 
 on:
   workflow_dispatch:
     inputs:
-      stake_ref:
-        description: "Branch or tag of solana-program/stake to build (e.g., main or v1.0.0)"
+      program_dir:
+        description: "Root folder containing the on-chain code (e.g., programs/stake or programs/vote)"
         type: string
         required: true
-        default: "main"
+        default: "programs/stake"
+      artifact_prefix:
+        description: "Base name of the output .so (e.g., solana_stake_program or solana_vote_program)"
+        type: string
+        required: true
+        default: "solana_stake_program"
+      agave_version:
+        description: "Agave release tag to install (e.g., v2.3.9)"
+        type: string
+        required: true
+        default: "v2.3.9"
+      pin_base64ct:
+        description: "Pre-2024 base64ct version (latest 1.7.x recommended)"
+        type: string
+        required: true
+        default: "1.7.3"
+      cargo_args:
+        description: "Extra Cargo args forwarded after '--' (e.g., --features bpf-entrypoint --release)"
+        type: string
+        required: false
+        default: ""
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout this repo (for provenance only)
-        uses: actions/checkout@v4
 
-      - name: Checkout solana-program/stake
+    env:
+      PROGRAM_DIR: ${{ github.event.inputs.program_dir }}
+      ARTIFACT_PREFIX: ${{ github.event.inputs.artifact_prefix }}
+      AGAVE_VERSION: ${{ github.event.inputs.agave_version }}
+      PIN_BASE64CT: ${{ github.event.inputs.pin_base64ct }}
+      EXTRA_CARGO_ARGS: ${{ github.event.inputs.cargo_args }}
+
+    steps:
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          repository: solana-program/stake
-          ref: ${{ github.event.inputs.stake_ref }}
-          path: stake-src
+          fetch-depth: 0
 
       - name: System deps
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y curl ca-certificates git pkg-config libssl-dev build-essential clang llvm lld cmake jq
+          sudo apt-get install -y \
+            curl ca-certificates git pkg-config libssl-dev build-essential \
+            clang llvm lld cmake jq
 
       - name: Install Rust (host)
         run: |
@@ -39,63 +64,186 @@ jobs:
           rustup --version
           cargo --version
 
-      - name: Install Agave CLI (for cargo-build-sbf)
+      - name: Install Agave toolchain (robust) and export PATH
         run: |
           set -euxo pipefail
-          # Pin to the same Agave installer you’ve been using; adjust tag if you like
-          AGAVE_VERSION=v2.3.9
-          curl -sSfL "https://github.com/anza-xyz/agave/releases/download/${AGAVE_VERSION}/agave-install-init-x86_64-unknown-linux-gnu" -o agave-install-init
-          chmod +x agave-install-init
-          ./agave-install-init "${AGAVE_VERSION}"
-
-          AGAVE_BIN="$HOME/.local/share/agave/install/active_release/bin"
-          SOLANA_BIN="$HOME/.local/share/solana/install/active_release/bin"
-
-          if [ -x "$AGAVE_BIN/cargo-build-sbf" ]; then
-            echo "$AGAVE_BIN" >> "$GITHUB_PATH"
-          elif [ -x "$SOLANA_BIN/cargo-build-sbf" ]; then
-            echo "$SOLANA_BIN" >> "$GITHUB_PATH"
-          else
-            echo "cargo-build-sbf not found after install"
-            find "$HOME/.local/share" -maxdepth 6 -type f -name 'cargo-build-sbf' -print || true
-            exit 1
+          # Preferred: official installer for the given tag
+          curl -sSfL "https://release.anza.xyz/${AGAVE_VERSION}/install" -o agave-install.sh || true
+          if [ -s agave-install.sh ]; then
+            sh agave-install.sh || true
           fi
 
-          which cargo-build-sbf
-          cargo-build-sbf --version || true
-          command -v agave && agave --version || true
-          command -v solana && solana --version || true
+          SOLANA_BIN="$HOME/.local/share/solana/install/active_release/bin"
+          if [ -d "$SOLANA_BIN" ]; then
+            echo "$SOLANA_BIN" >> "$GITHUB_PATH"
+            export PATH="$SOLANA_BIN:$PATH"
+          fi
 
-      - name: Build Stake BPF (with required feature)
-        working-directory: stake-src/program
+          # Fallback: prebuilt tarball from GitHub Releases (if subcommand still missing)
+          if ! command -v cargo-build-sbf >/dev/null 2>&1; then
+            echo "Installer did not expose cargo-build-sbf; falling back to prebuilt tarball…"
+            mkdir -p _agave && cd _agave
+            curl -sSfL "https://github.com/anza-xyz/agave/releases/download/${AGAVE_VERSION}/solana-release-x86_64-unknown-linux-gnu.tar.bz2" -o solana-release.tar.bz2
+            tar jxf solana-release.tar.bz2
+            echo "$PWD/solana-release/bin" >> "$GITHUB_PATH"
+            export PATH="$PWD/solana-release/bin:$PATH"
+            cd ..
+          fi
+
+          # Smoke test
+          command -v cargo-build-sbf
+          cargo-build-sbf --version || true
+
+      - name: Locate on-chain crate (hyphen/underscore aware)
+        id: locate
         run: |
           set -euxo pipefail
-          # Per repo docs, you must enable the BPF entrypoint feature
-          cargo-build-sbf --features bpf-entrypoint
+          PD="${PROGRAM_DIR}"
+          WANT_LIB="${ARTIFACT_PREFIX}"                # e.g., solana_stake_program
+          WANT_PKG="${ARTIFACT_PREFIX//_/-}"           # e.g., solana-stake-program
+
+          [ -d "$PD" ] || { echo "PROGRAM_DIR not found: $PD" >&2; exit 1; }
+
+          mapfile -t CANDIDATES < <(find "$PD" -maxdepth 4 -type f -name Cargo.toml | sort)
+          [ "${#CANDIDATES[@]}" -gt 0 ] || { echo "No Cargo.toml under $PD" >&2; exit 1; }
+
+          in_section() { # $1=manifest $2=SECTION $3=NAME
+            sed -n "/^\[$2\]/,/^\[/p" "$1" | grep -qE "^[[:space:]]*name[[:space:]]*=[[:space:]]*\"$3\""
+          }
+
+          choose_manifest() {
+            for m in "${CANDIDATES[@]}"; do
+              if in_section "$m" "package" "$WANT_PKG"; then echo "$m"; return 0; fi
+            done
+            for m in "${CANDIDATES[@]}"; do
+              if in_section "$m" "lib" "$WANT_LIB"; then echo "$m"; return 0; fi
+            done
+            for m in "${CANDIDATES[@]}"; do
+              if grep -Eq 'solana[-_]program' "$m" && grep -q 'crate-type' "$m"; then echo "$m"; return 0; fi
+            done
+            if [ -f "$PD/Cargo.toml" ] && ! grep -q '^\[workspace\]' "$PD/Cargo.toml"; then
+              echo "$PD/Cargo.toml"; return 0
+            fi
+            return 1
+          }
+
+          MANIFEST="$(choose_manifest || true)"
+          [ -n "$MANIFEST" ] || { echo "Could not locate an on-chain crate manifest under $PD" >&2; printf '%s\n' "${CANDIDATES[@]}"; exit 1; }
+
+          CRATE_DIR="$(dirname "$MANIFEST")"
+          echo "CRATE_DIR=$CRATE_DIR" | tee -a "$GITHUB_ENV"
+
+          echo "Selected manifest: $MANIFEST"
+          sed -n '1,140p' "$MANIFEST" || true
+
+      - name: Discover workspace root
+        id: ws
+        working-directory: ${{ env.CRATE_DIR }}
+        run: |
+          set -euxo pipefail
+          WSROOT="$(cargo metadata --format-version 1 --no-deps | jq -r '.workspace_root')"
+          echo "WSROOT=$WSROOT" | tee -a "$GITHUB_ENV"
+          echo "Workspace root: $WSROOT"
+          cargo metadata --format-version 1 --no-deps | jq '.packages | map(.name)'
+
+      - name: Pin base64ct (pre-2024) in workspace lockfile
+        working-directory: ${{ env.WSROOT }}
+        run: |
+          set -euxo pipefail
+          cargo generate-lockfile || true
+          cargo update -p base64ct --precise "${PIN_BASE64CT}" || true
+          if [ -f Cargo.lock ]; then
+            echo "Lockfile snippet for base64ct:"
+            awk '$0 ~ /^name = "base64ct"$/ {print; getline; print; getline; print}' Cargo.lock || true
+          fi
+
+      # Optional hardening: ensure getrandom uses the custom backend for Solana target (idempotent)
+      - name: Ensure getrandom(custom) for Solana target
+        working-directory: ${{ env.CRATE_DIR }}
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+import re, sys, pathlib
+p = pathlib.Path("Cargo.toml")
+s = p.read_text()
+hdr = r"^\[target\.'cfg\(target_os\s*=\s*\"solana\"\)'\.dependencies\]\s*$"
+hdr_re = re.compile(hdr, re.MULTILINE)
+sec_re = re.compile(r"^\[.*\]\s*$", re.MULTILINE)
+if hdr_re.search(s):
+    start = hdr_re.search(s).end()
+    m2 = sec_re.search(s, start)
+    end = m2.start() if m2 else len(s)
+    body = s[start:end]
+    if not re.search(r"^\s*getrandom\s*=", body, re.MULTILINE):
+        s = s[:end] + 'getrandom = { version = "0.2", default-features = false, features = ["custom"] }\n' + s[end:]
+else:
+    s = s + '\n[target.\'cfg(target_os = "solana")\'.dependencies]\n' \
+            'getrandom = { version = "0.2", default-features = false, features = ["custom"] }\n'
+p.write_text(s)
+print("Ensured target-specific getrandom(custom).", file=sys.stderr)
+PY
+          echo "Preview:"
+          sed -n '1,160p' Cargo.toml
+
+      - name: Build (SBF) with --locked (plus any extra cargo args)
+        id: build
+        working-directory: ${{ env.CRATE_DIR }}
+        run: |
+          set -euxo pipefail
+          set +e
+          if [ -n "${EXTRA_CARGO_ARGS}" ]; then
+            echo "Forwarding extra Cargo args: ${EXTRA_CARGO_ARGS}"
+            cargo-build-sbf -- --locked ${EXTRA_CARGO_ARGS} 2>&1 | tee build.log
+          else
+            cargo-build-sbf -- --locked 2>&1 | tee build.log
+          fi
+          st=${PIPESTATUS[0]}
+          set -e
+          echo "build_status=$st" | tee -a "$GITHUB_OUTPUT"
+
+      - name: On failure, show reverse-deps for getrandom and tail build log
+        if: steps.build.outputs.build_status != '0'
+        working-directory: ${{ env.CRATE_DIR }}
+        run: |
+          set -euxo pipefail
+          cargo install cargo-tree || true
+          echo "=== cargo tree -i getrandom (who depends on it) ==="
+          cargo tree -i getrandom -e features || true
+          echo "=== end cargo tree ==="
+          echo "Last 200 lines of build.log:"
+          tail -n 200 build.log || true
+          exit 1
 
       - name: Collect artifact
         run: |
           set -euxo pipefail
           mkdir -p artifacts
-          # Default location created by cargo build-sbf
-          so_path="stake-src/target/deploy/solana_stake_program.so"
-          if [ ! -f "$so_path" ]; then
-            # Fallback search if target path differs
-            so_path="$(find stake-src/target -type f -name 'solana_stake_program*.so' | head -n1 || true)"
+          so_path="$(find "${CRATE_DIR}/target" -type f -name "${ARTIFACT_PREFIX}*.so" | head -n1 || true)"
+          if [ -z "${so_path}" ]; then
+            so_path="$(find "${CRATE_DIR}/target" -type f -name "*_program*.so" | head -n1 || true)"
           fi
-          if [ -z "$so_path" ]; then
-            echo "Could not find solana_stake_program.so under stake-src/target"
-            find stake-src/target -maxdepth 4 -type f -name '*.so' -print || true
+          if [ -z "${so_path}" ]; then
+            echo "Could not find .so under ${CRATE_DIR}/target"
+            find "${CRATE_DIR}/target" -maxdepth 4 -type f -name '*.so' -print || true
             exit 1
           fi
-          cp "$so_path" artifacts/solana_stake_program.so
+          cp "${so_path}" "artifacts/${ARTIFACT_PREFIX}.so"
 
-          # Minimal provenance
-          (cd stake-src && git rev-parse HEAD) > artifacts/stake_repo_commit.txt
+          # Provenance
+          git rev-parse HEAD > artifacts/git_commit.txt
           (cargo-build-sbf --version || true) > artifacts/cargo_build_sbf_version.txt
+          {
+            echo "program_dir=${PROGRAM_DIR}"
+            echo "crate_dir=${CRATE_DIR}"
+            echo "workspace_root=${WSROOT}"
+            echo "artifact_prefix=${ARTIFACT_PREFIX}"
+            echo "agave_version=${AGAVE_VERSION}"
+            echo "pin_base64ct=${PIN_BASE64CT}"
+            echo "extra_cargo_args=${EXTRA_CARGO_ARGS}"
+          } > artifacts/build_meta.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: solana_stake_program
+          name: ${{ env.ARTIFACT_PREFIX }}-${{ env.AGAVE_VERSION }}
           path: artifacts/*
