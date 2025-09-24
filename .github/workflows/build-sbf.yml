@@ -145,7 +145,6 @@ jobs:
           echo "Workspace root: $WSROOT"
           cargo metadata --format-version 1 --no-deps | jq '.packages | map(.name)'
 
-      # Pin base64ct to pre-2024 in the workspace lockfile
       - name: Pin base64ct in workspace lockfile
         working-directory: ${{ env.WSROOT }}
         run: |
@@ -157,42 +156,40 @@ jobs:
             awk '$0 ~ /^name = "base64ct"$/ {print; getline; print; getline; print}' Cargo.lock || true
           fi
 
-      # Force getrandom 'custom' backend for Solana target (only modifies CI workspace)
       - name: Ensure getrandom(custom) for Solana
         working-directory: ${{ env.CRATE_DIR }}
         run: |
           set -euxo pipefail
           python3 - <<'PY'
-import re, sys, pathlib
-p = pathlib.Path("Cargo.toml")
-s = p.read_text()
-hdr = r"^\[target\.'cfg\(target_os\s*=\s*\"solana\"\)'\.dependencies\]\s*$"
-hdr_re = re.compile(hdr, re.MULTILINE)
-sec_re = re.compile(r"^\[.*\]\s*$", re.MULTILINE)
+          import re, sys, pathlib
+          p = pathlib.Path("Cargo.toml")
+          s = p.read_text()
+          hdr = r"^\[target\.'cfg\(target_os\s*=\s*\"solana\"\)'\.dependencies\]\s*$"
+          hdr_re = re.compile(hdr, re.MULTILINE)
+          sec_re = re.compile(r"^\[.*\]\s*$", re.MULTILINE)
 
-if hdr_re.search(s):
-    start = hdr_re.search(s).end()
-    m2 = sec_re.search(s, start)
-    end = m2.start() if m2 else len(s)
-    body = s[start:end]
-    if re.search(r"^\s*getrandom\s*=", body, re.MULTILINE):
-        pass
-    else:
-        ins = 'getrandom = { version = "0.2", default-features = false, features = ["custom"] }\n'
-        s = s[:end] + ins + s[end:]
-else:
-    ins = '\n[target.\'cfg(target_os = "solana")\'.dependencies]\n' \
-          'getrandom = { version = "0.2", default-features = false, features = ["custom"] }\n'
-    s = s + ins
+          if hdr_re.search(s):
+              start = hdr_re.search(s).end()
+              m2 = sec_re.search(s, start)
+              end = m2.start() if m2 else len(s)
+              body = s[start:end]
+              if re.search(r"^\s*getrandom\s*=", body, re.MULTILINE):
+                  pass
+              else:
+                  ins = 'getrandom = { version = "0.2", default-features = false, features = ["custom"] }\n'
+                  s = s[:end] + ins + s[end:]
+          else:
+              ins = '\n[target.\'cfg(target_os = "solana")\'.dependencies]\n' \
+                    'getrandom = { version = "0.2", default-features = false, features = ["custom"] }\n'
+              s = s + ins
 
-p.write_text(s)
-print("Injected/ensured target-specific getrandom(custom).", file=sys.stderr)
-PY
+          p.write_text(s)
+          print("Injected/ensured target-specific getrandom(custom).", file=sys.stderr)
+          PY
 
           echo "Preview of injected section:"
           sed -n '1,160p' Cargo.toml
 
-      # Build with locked deps; on specific getrandom error, retry with --no-default-features
       - name: Build (SBF) with fallback
         working-directory: ${{ env.CRATE_DIR }}
         run: |
