@@ -1,22 +1,26 @@
-name: build-sbf-pre2024-pin-v6
+name: build-sbf-pre2024-pin-v7
 
 on:
   workflow_dispatch:
     inputs:
       program_dir:
-        description: "Root folder that contains the stake/vote code (e.g. programs/stake or programs/vote)"
+        description: "Root folder that contains the stake/vote code (e.g., programs/stake or programs/vote)"
+        type: string
         required: true
         default: "programs/stake"
       artifact_prefix:
-        description: "Output base name (e.g. solana_stake_program or solana_vote_program)"
+        description: "Output base name (e.g., solana_stake_program or solana_vote_program)"
+        type: string
         required: true
         default: "solana_stake_program"
       agave_version:
         description: "Agave release tag"
+        type: string
         required: true
         default: "v2.3.9"
       pin_base64ct:
         description: "Pre-2024 base64ct (latest 1.7.x recommended)"
+        type: string
         required: true
         default: "1.7.3"
 
@@ -100,15 +104,15 @@ jobs:
           fi
 
           choose_manifest() {
-            # 1) prefer package name matching artifact_prefix
+            # 1) prefer package name matching artifact_prefix (under [package])
             for m in "${CANDIDATES[@]}"; do
-              if grep -qE '^name\s*=\s*"'${ARTIFACT_PREFIX}'"' "$m"; then
+              if awk '/^\[package\]/{p=1;next}/^\[/{p=0} p && $0 ~ /^\s*name\s*=\s*"'${ARTIFACT_PREFIX}'"$/ {exit 0} END{exit 1}' "$m"; then
                 echo "$m"; return 0
               fi
             done
-            # 2) looks like SBF on-chain crate: depends on solana_program and declares cdylib
+            # 2) looks like SBF on-chain crate: depends on solana[-_]program and declares cdylib
             for m in "${CANDIDATES[@]}"; do
-              if grep -q 'solana_program' "$m" && grep -q 'crate-type' "$m"; then
+              if grep -Eq 'solana[-_]program' "$m" && grep -q 'crate-type' "$m"; then
                 echo "$m"; return 0
               fi
             done
@@ -167,19 +171,16 @@ hdr_re = re.compile(hdr, re.MULTILINE)
 sec_re = re.compile(r"^\[.*\]\s*$", re.MULTILINE)
 
 if hdr_re.search(s):
-    # Find section boundaries
     start = hdr_re.search(s).end()
     m2 = sec_re.search(s, start)
     end = m2.start() if m2 else len(s)
     body = s[start:end]
     if re.search(r"^\s*getrandom\s*=", body, re.MULTILINE):
-        # already present; nothing to do
         pass
     else:
         ins = 'getrandom = { version = "0.2", default-features = false, features = ["custom"] }\n'
         s = s[:end] + ins + s[end:]
 else:
-    # Append new target-specific section
     ins = '\n[target.\'cfg(target_os = "solana")\'.dependencies]\n' \
           'getrandom = { version = "0.2", default-features = false, features = ["custom"] }\n'
     s = s + ins
@@ -189,7 +190,7 @@ print("Injected/ensured target-specific getrandom(custom).", file=sys.stderr)
 PY
 
           echo "Preview of injected section:"
-          sed -n '1,140p' Cargo.toml
+          sed -n '1,160p' Cargo.toml
 
       # Build with locked deps; on specific getrandom error, retry with --no-default-features
       - name: Build (SBF) with fallback
@@ -200,7 +201,7 @@ PY
           cargo-build-sbf -- --locked 2>&1 | tee build.log
           st=${PIPESTATUS[0]}
           set -e
-          if [ $st -ne 0 ] && grep -q "getrandom/#unsupported-targets" build.log; then
+          if [ $st -ne 0 ] && grep -q "docs.rs/getrandom/#unsupported-targets" build.log; then
             echo "Retry: getrandom unsupported -> building with --no-default-features"
             cargo-build-sbf -- --locked --no-default-features
           else
