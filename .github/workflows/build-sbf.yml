@@ -220,4 +220,30 @@ jobs:
           mkdir -p artifacts
           so_path="$(find "${CRATE_DIR}/target" -type f -name "${ARTIFACT_PREFIX}*.so" | head -n1 || true)"
           if [ -z "${so_path}" ]; then
-            so_path="$(find "${CRATE_DIR}/target" -type f -name "*_program*.so" | head -n1 || true)
+            so_path="$(find "${CRATE_DIR}/target" -type f -name "*_program*.so" | head -n1 || true)"
+          fi
+          if [ -z "${so_path}" ]; then
+            echo "Could not find .so under ${CRATE_DIR}/target"
+            find "${CRATE_DIR}/target" -maxdepth 4 -type f -name '*.so' -print || true
+            exit 1
+          fi
+          cp "${so_path}" "artifacts/${ARTIFACT_PREFIX}.so"
+
+          # Provenance
+          git rev-parse HEAD > artifacts/git_commit.txt
+          (cargo-build-sbf --version || true) > artifacts/cargo_build_sbf_version.txt
+          {
+            echo "program_dir=${PROGRAM_DIR}"
+            echo "crate_dir=${CRATE_DIR}"
+            echo "workspace_root=${WSROOT}"
+            echo "artifact_prefix=${ARTIFACT_PREFIX}"
+            echo "agave_version=${AGAVE_VERSION}"
+            echo "pin_base64ct=${PIN_BASE64CT}"
+            echo "extra_cargo_args=${EXTRA_CARGO_ARGS}"
+          } > artifacts/build_meta.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_PREFIX }}-${{ env.AGAVE_VERSION }}
+          path: artifacts/*
