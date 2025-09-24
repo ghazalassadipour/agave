@@ -157,31 +157,31 @@ jobs:
             awk '$0 ~ /^name = "base64ct"$/ {print; getline; print; getline; print}' Cargo.lock || true
           fi
 
-      # Optional hardening: ensure getrandom uses the custom backend for Solana target (idempotent)
       - name: Ensure getrandom(custom) for Solana target
         working-directory: ${{ env.CRATE_DIR }}
         run: |
           set -euxo pipefail
           python3 - <<'PY'
-import re, sys, pathlib
-p = pathlib.Path("Cargo.toml")
-s = p.read_text()
-hdr = r"^\[target\.'cfg\(target_os\s*=\s*\"solana\"\)'\.dependencies\]\s*$"
-hdr_re = re.compile(hdr, re.MULTILINE)
-sec_re = re.compile(r"^\[.*\]\s*$", re.MULTILINE)
-if hdr_re.search(s):
-    start = hdr_re.search(s).end()
-    m2 = sec_re.search(s, start)
-    end = m2.start() if m2 else len(s)
-    body = s[start:end]
-    if not re.search(r"^\s*getrandom\s*=", body, re.MULTILINE):
-        s = s[:end] + 'getrandom = { version = "0.2", default-features = false, features = ["custom"] }\n' + s[end:]
-else:
-    s = s + '\n[target.\'cfg(target_os = "solana")\'.dependencies]\n' \
-            'getrandom = { version = "0.2", default-features = false, features = ["custom"] }\n'
-p.write_text(s)
-print("Ensured target-specific getrandom(custom).", file=sys.stderr)
-PY
+          import re, sys, pathlib
+          p = pathlib.Path("Cargo.toml")
+          s = p.read_text()
+          hdr = r"^\[target\.'cfg\(target_os\s*=\s*\"solana\"\)'\.dependencies\]\s*$"
+          hdr_re = re.compile(hdr, re.MULTILINE)
+          sec_re = re.compile(r"^\[.*\]\s*$", re.MULTILINE)
+          if hdr_re.search(s):
+              start = hdr_re.search(s).end()
+              m2 = sec_re.search(s, start)
+              end = m2.start() if m2 else len(s)
+              body = s[start:end]
+              if not re.search(r"^\s*getrandom\s*=", body, re.MULTILINE):
+                  s = s[:end] + 'getrandom = { version = "0.2", default-features = false, features = ["custom"] }\n' + s[end:]
+          else:
+              s = s + '\n[target.\'cfg(target_os = "solana")\'.dependencies]\n' \
+                      'getrandom = { version = "0.2", default-features = false, features = ["custom"] }\n'
+          p.write_text(s)
+          print("Ensured target-specific getrandom(custom).", file=sys.stderr)
+          PY
+
           echo "Preview:"
           sed -n '1,160p' Cargo.toml
 
@@ -220,30 +220,4 @@ PY
           mkdir -p artifacts
           so_path="$(find "${CRATE_DIR}/target" -type f -name "${ARTIFACT_PREFIX}*.so" | head -n1 || true)"
           if [ -z "${so_path}" ]; then
-            so_path="$(find "${CRATE_DIR}/target" -type f -name "*_program*.so" | head -n1 || true)"
-          fi
-          if [ -z "${so_path}" ]; then
-            echo "Could not find .so under ${CRATE_DIR}/target"
-            find "${CRATE_DIR}/target" -maxdepth 4 -type f -name '*.so' -print || true
-            exit 1
-          fi
-          cp "${so_path}" "artifacts/${ARTIFACT_PREFIX}.so"
-
-          # Provenance
-          git rev-parse HEAD > artifacts/git_commit.txt
-          (cargo-build-sbf --version || true) > artifacts/cargo_build_sbf_version.txt
-          {
-            echo "program_dir=${PROGRAM_DIR}"
-            echo "crate_dir=${CRATE_DIR}"
-            echo "workspace_root=${WSROOT}"
-            echo "artifact_prefix=${ARTIFACT_PREFIX}"
-            echo "agave_version=${AGAVE_VERSION}"
-            echo "pin_base64ct=${PIN_BASE64CT}"
-            echo "extra_cargo_args=${EXTRA_CARGO_ARGS}"
-          } > artifacts/build_meta.txt
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.ARTIFACT_PREFIX }}-${{ env.AGAVE_VERSION }}
-          path: artifacts/*
+            so_path="$(find "${CRATE_DIR}/target" -type f -name "*_program*.so" | head -n1 || true)
